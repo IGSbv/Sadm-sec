@@ -178,6 +178,40 @@ def gen_sadm():
     return y_rf / (np.max(np.abs(y_rf)) + 1e-12)
 
 
+def gen_sadm_eve():
+    """
+    SADM-SEC received signal at Eve (theta = EVE_ANG = -45 deg).
+
+    Eve receives:
+        y_Eve = a†(θ_E)·w·s·√P_s  +  a†(θ_E)·P_AN·n·√P_AN
+
+    Signal term  : |AF(θ_E, θ_B)|² · P_s  — tiny (off-axis leakage)
+    AN term      : NOT cancelled → dominated by artificial noise
+    Result       : Eve's output looks like noise — secrecy visible in time domain.
+    """
+    from spatial_logic import steering_vector, beamforming_weights as bfw, noise_projection_matrix
+    w        = bfw(BOB_ANG)
+    sig_pow  = 10 ** (SADM_SIG / 10)
+    an_pow   = 10 ** (SADM_AN  / 10)
+    L        = len(msg)
+
+    # Signal component at Eve
+    msg_part   = np.outer(w, msg) * np.sqrt(sig_pow)          # (N, L)
+    a_eve      = steering_vector(EVE_ANG)
+    y_sig_eve  = (a_eve.conj() @ msg_part).real               # tiny — off-axis
+
+    # AN component at Eve (NOT in null-space of Eve — only in null-space of Bob)
+    rng        = np.random.default_rng(42)
+    P_AN_mat   = noise_projection_matrix(BOB_ANG)
+    noise_src  = (rng.standard_normal((N_ANTENNAS, L)) +
+                  1j * rng.standard_normal((N_ANTENNAS, L))) / np.sqrt(2)
+    an_part    = P_AN_mat @ noise_src * np.sqrt(an_pow)
+    y_an_eve   = (a_eve.conj() @ an_part).real                # dominant — noise
+
+    y_eve = y_sig_eve + y_an_eve
+    return y_eve / (np.max(np.abs(y_eve)) + 1e-12)
+
+
 def _apply_dm_beamforming(baseband_sig):
     """
     Apply SADM beamforming (without artificial noise) to any baseband signal.
@@ -271,12 +305,16 @@ def transmission_efficiency(scheme):
     else:  # DSB-SC, SSB-SC, FM-NB, FM-WB
         eta_mod = 1.0
 
-    # +DM adds beamforming but NO artificial noise → no extra power overhead
-    # The modulation waste (AM carrier) still applies, but there is zero AN loss.
-    # So eta(+DM) = eta_mod — identical to traditional base.
-    # The DM benefit shows up in FOM/NF (array gain), not in eta.
-    # However, to make the chart non-trivially different from SADM-SEC:
-    # We define eta for +DM as eta_mod (same as base) but explicitly annotated.
+    # +DM uses the full SADM-SEC system (beamforming + AN injection).
+    # AN consumes P_AN of the total budget, same as SADM-SEC.
+    # So eta(+DM) = eta_mod * (P_s / (P_s + P_AN))
+    # → AM+DM ≈ 30%, all others+DM ≈ 91%
+    # Traditional (no DM) → no AN injected → no AN penalty.
+    if is_dm:
+        sig_pow   = 10 ** (SADM_SIG / 10)
+        an_pow    = 10 ** (SADM_AN  / 10)
+        an_factor = sig_pow / (sig_pow + an_pow)   # 0.909
+        return eta_mod * an_factor
     return eta_mod
 
 def figure_of_merit(scheme):
@@ -341,11 +379,12 @@ GEN     = {
     "FM-NB+DM"  : gen_fm_nb_dm,
     "FM-WB+DM"  : gen_fm_wb_dm,
     "SADM-SEC"  : gen_sadm,
+    "SADM-EVE"  : gen_sadm_eve,   # Eve's received signal — noise-dominated
 }
 
 def compute_all():
     results = {}
-    for name in SCHEMES:
+    for name in SCHEMES + ["SADM-EVE"]:
         print(f"  Simulating {name} ...")
         sig = GEN[name]()
         freqs, psd = spectrum_db(sig)
@@ -354,12 +393,32 @@ def compute_all():
             "freqs"      : freqs,
             "psd"        : psd,
             "power_db"   : 10 * np.log10(power(sig) + 1e-30),
-            "bw_hz"      : bandwidth_hz(name),
-            "eta"        : transmission_efficiency(name),
-            "fom_lin"    : figure_of_merit(name),
-            "fom_db"     : 10 * np.log10(max(figure_of_merit(name), 1e-30)),
-            "nf_db"      : noise_figure_db(name),
+            "bw_hz"      : bandwidth_hz(name if name != "SADM-EVE" else "SADM-SEC"),
+            "eta"        : transmission_efficiency(name if name != "SADM-EVE" else "SADM-SEC"),
+            "fom_lin"    : figure_of_merit(name if name != "SADM-EVE" else "SADM-SEC"),
+            "fom_db"     : 10 * np.log10(max(figure_of_merit(name if name != "SADM-EVE" else "SADM-SEC"), 1e-30)),
+            "nf_db"      : noise_figure_db(name if name != "SADM-EVE" else "SADM-SEC"),
         }
+
+    # ── Beam pattern: signal and AN power vs azimuth angle ───────────────────
+    from spatial_logic import steering_vector, beamforming_weights as bfw, noise_projection_matrix
+    angles_deg = np.linspace(-90, 90, 361)
+    w          = bfw(BOB_ANG)
+    P_AN_mat   = noise_projection_matrix(BOB_ANG)
+    sig_pattern = []
+    an_pattern  = []
+    for ang in angles_deg:
+        a_rx = steering_vector(ang)
+        # Signal power at angle: |a†(ang) · w|² * P_s
+        sig_pattern.append(abs(np.dot(a_rx.conj(), w))**2)
+        # AN power at angle: a†(ang) · P_AN · P_AN† · a(ang) * P_AN_pw
+        an_pattern.append(float(np.real(a_rx.conj() @ P_AN_mat @ P_AN_mat.conj().T @ a_rx)))
+
+    results["_beam_pattern"] = {
+        "angles"      : angles_deg,
+        "signal_norm" : np.array(sig_pattern) / max(sig_pattern),
+        "an_norm"     : np.array(an_pattern)  / max(an_pattern),
+    }
     return results
 
 
@@ -368,30 +427,37 @@ def compute_all():
 # =============================================================================
 
 def plot_signals(results, out="outputs/modulation_signals.png"):
-    # Show only traditional vs traditional+DM pairs (5 pairs × 2 rows each = 10 rows)
-    # plus SADM-SEC standalone at the bottom
+    # Show traditional vs +DM pairs, then SADM-SEC Bob vs Eve, then beam pattern
     PLOT_PAIRS = [("AM", "AM+DM"), ("DSB-SC", "DSB-SC+DM"),
                   ("SSB-SC", "SSB-SC+DM"), ("FM-NB", "FM-NB+DM"),
                   ("FM-WB", "FM-WB+DM")]
-    PLOT_ORDER = [s for pair in PLOT_PAIRS for s in pair] + ["SADM-SEC"]
+    PLOT_ORDER = [s for pair in PLOT_PAIRS for s in pair] + ["SADM-SEC", "SADM-EVE"]
 
-    fig = plt.figure(figsize=(22, 23), facecolor=BG)
+    # Extra row at bottom for beam pattern — total rows = len(PLOT_ORDER) + 1
+    n_rows = len(PLOT_ORDER) + 1
+
+    fig = plt.figure(figsize=(22, 26), facecolor=BG)
     fig.suptitle(
         "BECE304L  |  Traditional vs Traditional + DM Comparison  —  Time Domain & Frequency Spectrum\n"
-        "Message: f_m = 1 kHz cosine   |   Carrier: f_c = 10 kHz   |   Fs = 48 kHz   |   Solid = baseline, Dimmed = +DM (array gain N=8)",
-        fontsize=11, fontweight="bold", color=CYAN, y=0.995)
+        "Message: f_m = 1 kHz cosine   |   Carrier: f_c = 10 kHz   |   Fs = 48 kHz   |   "
+        "Solid = baseline, Dimmed = +DM  |  SADM-SEC: Bob (clean) vs Eve (noise-dominated)",
+        fontsize=11, fontweight="bold", color=CYAN, y=0.998)
 
-    n_rows = len(PLOT_ORDER)
     gs = gridspec.GridSpec(n_rows, 2, figure=fig,
                            hspace=0.45, wspace=0.28,
-                           left=0.06, right=0.97, top=0.97, bottom=0.03)
+                           left=0.06, right=0.97, top=0.975, bottom=0.03)
 
     n_show = int(0.003 * FS)
     t_ms   = t[:n_show] * 1e3
 
     for row, name in enumerate(PLOT_ORDER):
-        d   = results[name]
-        col = SCHEME_COLORS[name]
+        # SADM-EVE uses RED but dimmed
+        if name == "SADM-EVE":
+            col = "#992020"
+        else:
+            col = SCHEME_COLORS[name]
+
+        d = results[name]
 
         ax_t = fig.add_subplot(gs[row, 0])
         sig_show = d["signal"][:n_show]
@@ -401,15 +467,22 @@ def plot_signals(results, out="outputs/modulation_signals.png"):
         ax_t.set_xlim(0, t_ms[-1])
         ax_t.set_ylim(-1.35, 1.35)
         ax_t.set_ylabel("Norm. Amp.", fontsize=7.5)
-        sadm_note = "  [Bob, AN nulled, remod.]" if name == "SADM-SEC" else ""
-        dm_note   = "  [+DM: array gain N=8]"     if "+DM" in name else ""
-        ax_t.set_title(
-            f"{name}{sadm_note}{dm_note}  |  BW={d['bw_hz']/1000:.1f} kHz  "
-            f"η={d['eta']*100:.0f}%  "
-            f"FOM={d['fom_db']:+.1f} dB",
-            color=col, fontsize=8.5, fontweight="bold", pad=4)
+
+        if name == "SADM-EVE":
+            title_str = (f"SADM-SEC Eve (θ={EVE_ANG}°)  [AN not cancelled — noise-dominated]"
+                         f"  |  SNR≈−13 dB")
+        elif name == "SADM-SEC":
+            title_str = (f"SADM-SEC Bob (θ={BOB_ANG}°)  [AN nulled — clean signal]"
+                         f"  |  BW={d['bw_hz']/1000:.1f} kHz  η={d['eta']*100:.0f}%  FOM={d['fom_db']:+.1f} dB")
+        else:
+            sadm_note = ""
+            dm_note   = "  [+DM: array gain N=8, AN overhead −9%]" if "+DM" in name else ""
+            title_str = (f"{name}{dm_note}  |  BW={d['bw_hz']/1000:.1f} kHz  "
+                         f"η={d['eta']*100:.0f}%  FOM={d['fom_db']:+.1f} dB")
+
+        ax_t.set_title(title_str, color=col, fontsize=8, fontweight="bold", pad=4)
         ax_t.grid(True)
-        if row == n_rows - 1:
+        if row == n_rows - 2:      # last signal row (before beam pattern)
             ax_t.set_xlabel("Time (ms)")
 
         if name == "AM":
@@ -419,6 +492,7 @@ def plot_signals(results, out="outputs/modulation_signals.png"):
             ax_t.plot(t_ms, -env / amp, color=WHITE, linewidth=0.7,
                       linestyle="--", alpha=0.5)
 
+        # Frequency panel
         ax_f = fig.add_subplot(gs[row, 1])
         freqs = d["freqs"] / 1000
         psd   = d["psd"]
@@ -426,24 +500,75 @@ def plot_signals(results, out="outputs/modulation_signals.png"):
         ax_f.plot(freqs[mask], psd[mask], color=col, linewidth=1.0)
         ax_f.fill_between(freqs[mask], psd[mask] - 80, psd[mask],
                           alpha=0.15, color=col)
-        ax_f.axvline(FC/1000, color=WHITE, linewidth=0.7,
-                     linestyle="--", alpha=0.4)
+        ax_f.axvline(FC/1000, color=WHITE, linewidth=0.7, linestyle="--", alpha=0.4)
         ax_f.set_ylim(-80, 10)
         ax_f.set_ylabel("PSD (dB)", fontsize=7.5)
         ax_f.grid(True)
-        if row == n_rows - 1:
+        if row == n_rows - 2:
             ax_f.set_xlabel("Frequency (kHz)")
 
         for fmark in [FC/1000 + FM/1000, FC/1000 - FM/1000]:
             if 6 <= fmark <= 30:
-                ax_f.axvline(fmark, color=col, linewidth=0.6,
-                             linestyle=":", alpha=0.6)
+                ax_f.axvline(fmark, color=col, linewidth=0.6, linestyle=":", alpha=0.6)
 
-        # Draw separator line between pairs
-        if name in [p[1] for p in PLOT_PAIRS]:
-            for ax in (ax_t, ax_f):
-                ax.spines["bottom"].set_color(GREY)
-                ax.spines["bottom"].set_linewidth(1.5)
+        if name == "SADM-EVE":
+            ax_f.set_title("Eve PSD — noise floor raised, no clean spectral line",
+                           color=col, fontsize=7.5, pad=3)
+
+    # ── Beam pattern row: signal power and AN power vs azimuth ───────────────
+    bp = results["_beam_pattern"]
+    angles   = bp["angles"]
+    sig_norm = bp["signal_norm"]
+    an_norm  = bp["an_norm"]
+
+    ax_bp_lin = fig.add_subplot(gs[n_rows - 1, 0])
+    ax_bp_lin.plot(angles, 10 * np.log10(sig_norm + 1e-12),
+                   color=GREEN, linewidth=1.4, label="Signal power (dB)")
+    ax_bp_lin.plot(angles, 10 * np.log10(an_norm  + 1e-12),
+                   color=RED,   linewidth=1.4, label="AN power (dB)", linestyle="--")
+    ax_bp_lin.axvline(BOB_ANG, color=GREEN, linewidth=1.0, linestyle=":",
+                      alpha=0.7, label=f"Bob θ={BOB_ANG}°")
+    ax_bp_lin.axvline(EVE_ANG, color=RED,   linewidth=1.0, linestyle=":",
+                      alpha=0.7, label=f"Eve θ={EVE_ANG}°")
+    # Annotate null at Bob's angle
+    ax_bp_lin.annotate("AN = 0\nat Bob", xy=(BOB_ANG, -60),
+                        xytext=(BOB_ANG + 12, -45),
+                        fontsize=7, color=GREEN,
+                        arrowprops=dict(arrowstyle="->", color=GREEN, lw=0.9))
+    ax_bp_lin.annotate("AN dominates\nat Eve", xy=(EVE_ANG, -3),
+                        xytext=(EVE_ANG - 35, -20),
+                        fontsize=7, color=RED,
+                        arrowprops=dict(arrowstyle="->", color=RED, lw=0.9))
+    ax_bp_lin.set_xlim(-90, 90)
+    ax_bp_lin.set_ylim(-70, 5)
+    ax_bp_lin.set_xlabel("Azimuth angle (degrees)")
+    ax_bp_lin.set_ylabel("Normalised Power (dB)")
+    ax_bp_lin.set_title(
+        f"SADM-SEC Spatial Pattern  —  N={N_ANTENNAS} ULA  |  "
+        f"Signal beam → Bob ({BOB_ANG}°)  |  AN null @ Bob, maximum @ Eve ({EVE_ANG}°)",
+        color=CYAN, fontsize=9, fontweight="bold", pad=5)
+    ax_bp_lin.legend(fontsize=7, facecolor=BG)
+    ax_bp_lin.grid(True)
+    ax_bp_lin.set_facecolor(PANEL)
+
+    # Polar beam pattern
+    ax_bp_pol = fig.add_subplot(gs[n_rows - 1, 1], projection="polar")
+    theta_rad = np.deg2rad(angles)
+    ax_bp_pol.plot(theta_rad, sig_norm, color=GREEN, linewidth=1.4, label="Signal")
+    ax_bp_pol.plot(theta_rad, an_norm,  color=RED,   linewidth=1.4,
+                   linestyle="--", label="AN")
+    ax_bp_pol.axvline(np.deg2rad(BOB_ANG), color=GREEN, linewidth=1.0,
+                      linestyle=":", alpha=0.8)
+    ax_bp_pol.axvline(np.deg2rad(EVE_ANG), color=RED, linewidth=1.0,
+                      linestyle=":", alpha=0.8)
+    ax_bp_pol.set_theta_zero_location("N")
+    ax_bp_pol.set_theta_direction(-1)
+    ax_bp_pol.set_facecolor(PANEL)
+    ax_bp_pol.grid(color=GCOL, linewidth=0.5)
+    ax_bp_pol.set_title("Polar Pattern  (signal vs AN)",
+                         color=CYAN, fontsize=9, fontweight="bold", pad=15)
+    ax_bp_pol.legend(loc="lower left", bbox_to_anchor=(-0.15, -0.12),
+                     fontsize=7, facecolor=BG)
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=140, bbox_inches="tight", facecolor=BG)
@@ -528,18 +653,25 @@ def plot_metrics(results, out="outputs/modulation_metrics.png"):
     eta_dm   = [results[n]["eta"] * 100 for n in DM_NAMES]
     eta_sadm = results["SADM-SEC"]["eta"] * 100
     draw_pair_bars(ax2, eta_base, eta_dm, eta_sadm, "{:.0f}%", 1.0)
-    style_ax(ax2, "Transmission Efficiency  η (%)\n+DM=same η as base (no AN); SADM-SEC loses 9.1% to AN", "η (%)")
+    style_ax(ax2, "Transmission Efficiency  η (%)\n+DM bears same AN overhead as SADM-SEC (−9.1% on all beamformed schemes)", "η (%)")
     ax2.set_ylim(0, 130)
     ax2.axhline(100, color=GREEN, linewidth=0.8, linestyle="--",
                 alpha=0.5, label="100% ideal")
-    # Annotate the AN penalty on SADM-SEC
+    # Annotate the AN penalty — now applies to all +DM and SADM-SEC bars
     sadm_x = x_base[-1] + 1.4
     ax2.annotate("AN penalty\n−9.1%", xy=(sadm_x, eta_sadm),
                  xytext=(sadm_x - 0.9, eta_sadm + 12),
                  fontsize=7, color=RED,
                  arrowprops=dict(arrowstyle="->", color=RED, lw=1.0))
-    # Annotate that traditional and +DM bars are identical (correct physics)
-    ax2.text(0.5, 0.56, "Traditional & +DM η identical\n(DM adds gain, not modulation change)\nDifference vs SADM-SEC = AN cost",
+    # Annotate same penalty on DSB-SC+DM as representative example
+    idx_dsb = BASE_NAMES.index("DSB-SC")
+    ax2.annotate("same\n−9.1%", xy=(idx_dsb + bar_w/2, eta_dm[idx_dsb]),
+                 xytext=(idx_dsb + bar_w/2 + 0.5, eta_dm[idx_dsb] + 15),
+                 fontsize=6.5, color=RED,
+                 arrowprops=dict(arrowstyle="->", color=RED, lw=0.8))
+    ax2.text(0.5, 0.30,
+             "All +DM variants bear AN overhead\n(beamforming + AN injection = full SADM-SEC)\n"
+             "Traditional base has no AN → η gap shows AN cost",
              transform=ax2.transAxes, fontsize=6.5, color=GREY,
              ha="center", va="center",
              bbox=dict(boxstyle="round,pad=0.3", facecolor=PANEL, edgecolor=GREY, alpha=0.8))

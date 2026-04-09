@@ -36,10 +36,19 @@ def run_phase_math():
 
 
 def run_phase_noise():
-    print("\n" + ">>>" + " PHASE 2: Module 6 Noise Analysis  (BECE304L)")
-    from noise_analysis import print_noise_budget
-    print_noise_budget(bob_angle_deg=30.0, eve_angle_deg=-45.0,
-                       snr_signal_db=20.0, snr_noise_db=10.0)
+    print("\n" + ">>>" + " PHASE 2: Comparative Modulation Analysis")
+    # This invokes the logic you saw in modulation_comparision_updated.py
+    # and provides the Figure of Merit (FOM) for Bob vs Eve.
+    from spatial_logic import compute_snr_analytical, secrecy_rate
+    
+    bob_snr = compute_snr_analytical(30.0, 30.0)
+    eve_snr = compute_snr_analytical(-45.0, 30.0)
+    cs = secrecy_rate(bob_snr, eve_snr)
+    
+    print(f"Projected Performance (N=8 ULA):")
+    print(f" - Bob SNR: {bob_snr:.2f} dB (includes +9.03 dB array gain)")
+    print(f" - Eve SNR: {eve_snr:.2f} dB (degraded by AN)")
+    print(f" - Secrecy Rate: {cs:.2f} bits/s/Hz")
 
 
 def run_phase_sim(use_ml=True):
