@@ -76,6 +76,7 @@ def compute_snr_analytical(
         bob_deg:          float,
         signal_pow_db:    float = 20.0,
         an_pow_db:        float = 10.0,
+        n_antennas:       int   = N_ANTENNAS,
         thermal_noise_db: float = THERMAL_NOISE_DB
 ) -> float:
     """Analytical SNR calculation for stable FOM reporting."""
@@ -84,13 +85,13 @@ def compute_snr_analytical(
     sigma2 = 10 ** (thermal_noise_db / 10)
 
     af = array_factor(rx_angle_deg, bob_deg)
-    # FIX: N_ANTENNAS multiplier restores coherent array gain
-    sig_power = N_ANTENNAS * (abs(af) ** 2) * Ps
+    # Apply N_ANTENNAS parameter directly
+    sig_power = n_antennas * (abs(af) ** 2) * Ps
 
     P_AN_mat = noise_projection_matrix(bob_deg)
     a_rx     = steering_vector(rx_angle_deg)
-    # FIX: N_ANTENNAS multiplier applies spatial gain to the noise floor
-    an_power = N_ANTENNAS * Pan * float(np.real(a_rx.conj() @ P_AN_mat @ P_AN_mat.conj().T @ a_rx))
+    # Apply N_ANTENNAS parameter directly
+    an_power = n_antennas * Pan * float(np.real(a_rx.conj() @ P_AN_mat @ P_AN_mat.conj().T @ a_rx))
 
     snr_lin = sig_power / (sigma2 + an_power + 1e-20)
     return 10 * np.log10(max(snr_lin, 1e-15))

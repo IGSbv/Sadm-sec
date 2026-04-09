@@ -758,7 +758,7 @@ def plot_metrics(results, out="outputs/modulation_metrics.png"):
 
     ax5.set_xlabel("Channel SNR (dB)")
     ax5.set_ylabel("FOM (dB)")
-    ax5.set_ylim(-30, 40)
+    ax5.set_ylim(-80, 40)
     ax5.grid(True, color=GCOL)
     ax5.set_facecolor(PANEL)
     ax5.legend(fontsize=5.5, facecolor=BG, ncol=2)

@@ -67,6 +67,35 @@ def fom_theoretical_array(n_antennas: int) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 #  3. SWEEP FUNCTIONS (Required for Phase 5)
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  FIGURE OF MERIT — SADM-SEC
+# ─────────────────────────────────────────────────────────────────────────────
+
+def figure_of_merit_sadm(rx_angle_deg: float,
+                          bob_angle_deg: float,
+                          snr_signal_db: float = 20.0,
+                          snr_noise_db: float  = None,
+                          n_antennas: int = N_ANTENNAS) -> tuple:
+    """
+    Figure of Merit for SADM system at a given receiver angle (dB).
+    """
+    # CRITICAL FIX: If no explicit noise floor is provided, force it to scale 
+    # proportionally with the signal (e.g., 10 dB below signal power).
+    if snr_noise_db is None:
+        snr_noise_db = snr_signal_db - 10.0
+        
+    snr_ch_db  = _channel_snr_db(snr_signal_db)
+    
+    # Strict kwargs to prevent positional hijacking
+    snr_out_db = compute_snr_analytical(
+        rx_angle_deg=rx_angle_deg, 
+        bob_deg=bob_angle_deg,
+        signal_pow_db=snr_signal_db, 
+        an_pow_db=snr_noise_db,
+        n_antennas=n_antennas
+    )
+    fom_db = snr_out_db - snr_ch_db
+    return fom_db, snr_out_db, snr_ch_db
 
 def fom_vs_snr_sweep(bob_angle_deg: float  = 30.0,
                      eve_angle_deg: float   = -45.0,
@@ -74,28 +103,40 @@ def fom_vs_snr_sweep(bob_angle_deg: float  = 30.0,
                      snr_noise_db: float    = 10.0,
                      n_antennas: int        = N_ANTENNAS) -> dict:
     if snr_signal_range is None:
+        # Sweeping transmit signal power from -10 to 30 dBW
         snr_signal_range = np.linspace(-10, 30, 100)
 
     snr_ch_arr, fom_bob_arr, fom_eve_arr = [], [], []
 
     for snr_sig in snr_signal_range:
         snr_ch = _channel_snr_db(snr_sig)
-
-        # FIX: Artificial Noise power MUST scale with the transmit power to cap Eve's SNR.
-        # We lock AN power to always be 10 dB below the current signal power.
+        
+        # Keep AN proportional to signal
         current_an_pow_db = snr_sig - 10.0
 
-        snr_b  = compute_snr_analytical(bob_angle_deg, bob_angle_deg,
-                                        snr_sig, current_an_pow_db, n_antennas)
-        snr_e  = compute_snr_analytical(eve_angle_deg, bob_angle_deg,
-                                        snr_sig, current_an_pow_db, n_antennas)
+        # STRICT KWARGS to prevent silent positional hijacking
+        snr_b  = compute_snr_analytical(
+            rx_angle_deg=bob_angle_deg, 
+            bob_deg=bob_angle_deg,
+            signal_pow_db=snr_sig, 
+            an_pow_db=current_an_pow_db, 
+            n_antennas=n_antennas
+        )
+        snr_e  = compute_snr_analytical(
+            rx_angle_deg=eve_angle_deg, 
+            bob_deg=bob_angle_deg,
+            signal_pow_db=snr_sig, 
+            an_pow_db=current_an_pow_db, 
+            n_antennas=n_antennas
+        )
+        
         snr_ch_arr.append(snr_ch)
         fom_bob_arr.append(snr_b - snr_ch)
         fom_eve_arr.append(snr_e - snr_ch)
 
     snr_ch_arr = np.array(snr_ch_arr)
     
-    # Textbook systems (constant FOM baselines)
+    # Textbook baseline limits
     fom_am_db   = 10 * np.log10(fom_am(1.0))
     fom_dsb_db  = 10 * np.log10(fom_dsb_sc())
     fom_fm_db   = 10 * np.log10(fom_fm(beta=5))
