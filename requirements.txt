@@ -1,0 +1,5 @@
+numpy
+scipy
+pyzmq
+gnuradio
+scikit-learn
